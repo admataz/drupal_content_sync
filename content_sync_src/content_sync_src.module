@@ -1,0 +1,265 @@
+<?php
+/**
+ * tell other sites' enpoint that there has been an update
+ */
+
+
+/**
+ * Implements hook_menu().
+ */
+function content_sync_src_menu() {
+    $items['admin/content/sync_src_settings'] = array(
+        'title' =>  'content sync settings',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array(
+            'content_sync_src_settings_form'
+        ) ,
+        'access arguments' => array(
+            'administer content sync src'
+        ) ,
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    $items[variable_get('content_sync_src_api_endpoint', 'default_api_endpoint')] = array(
+      'title' => 'API endpoint',
+      'page callback' => 'content_sync_src_receive_ping',
+      'access arguments' => array('access content'),
+      'type' => MENU_CALLBACK
+      );
+
+    return $items;
+}
+
+
+
+
+
+/**
+ * Implements hook_permission().
+ */
+function content_sync_src_permission() {
+    return array(
+        /*
+         *'administer my module' =>  array(
+         *  'title' => t('Administer my module'),
+         *  'description' => t('Perform administration tasks for my module.'),
+         *),
+        */
+        'administer pinger updates' => array(
+            'title' => t('Administer pinger updates') ,
+            'description' => t('Allow user to add to list of subscribers to site updates') ,
+        ) ,
+    );
+}
+
+/**
+ * settings form
+ */
+function content_sync_src_settings_form($form, &$form_state) {
+    $node_types = node_type_get_names();
+    $vocabulary_objs = taxonomy_vocabulary_get_names();
+    $vocabularies = array();//();
+    
+    $endpoints = services_endpoint_load_all();
+
+    $eps = array();
+    foreach($endpoints as $epid=>$ep){
+      $eps[$epid] = $ep->path. ' ('.$epid.')';
+    }
+
+    foreach ($vocabulary_objs as $vid => $obj) {
+        $vocabularies[$vid] = $obj->name;
+    }
+
+// TODO: get this from services
+    $form['content_sync_src_api_endpoint'] = array(
+      '#type' => 'select',
+      '#options' => $eps,
+      '#required' => TRUE,
+      '#default_value' => variable_get('content_sync_src_api_endpoint', ''),
+      '#title' => 'API endpoint path: '.url($base_url, array('absolute'=>true)).'+',
+      '#description' => 'The API endpoint path for comminicating with this server, taken from the '.l('Services configuration','admin/structure/services'),
+    );
+
+    $form['content_sync_src_subscribed_urls'] = array(
+      '#type' => 'textarea',
+      '#title' => 'List of urls to be pinged (1 per line)',
+      '#description' => t('If this is a source site, you need to provide URLs to ping on updates'),
+      '#default_value' => variable_get('content_sync_src_subscribed_urls', '')
+    );
+
+
+    $form['content_sync_src_node_types'] = array(
+      '#type' => 'checkboxes',
+      '#options' => $node_types,
+      '#title' => 'content types to sync',
+      '#default_value' => variable_get('content_sync_src_node_types', '')
+    );
+
+    $form['content_sync_src_vocabularies'] = array(
+      '#type' => 'checkboxes',
+      '#options' => $vocabularies,
+      '#title' => 'taxonomy vocabularies sync',
+      '#default_value' => variable_get('content_sync_src_vocabularies', '')
+    );
+
+
+    return system_settings_form($form);
+}
+
+
+
+/**
+ * Implements hook_entity_update().
+ */
+function content_sync_src_entity_update($entity, $type) {
+  _content_sync_src_ping_remotes($entity, $type, 'update');
+}
+
+
+
+/**
+ * Implements hook_entity_insert().
+ */
+function content_sync_src_entity_insert($entity, $type) {
+  _content_sync_src_ping_remotes($entity, $type, 'insert');
+}
+
+
+/**
+ * Implements hook_taxonomy_vocabulary_update().
+ */
+function content_sync_src_taxonomy_vocabulary_update($vocabulary) {
+  _content_sync_src_ping_remotes($vocabulary, 'taxonomy_vocabulary', 'update');
+}
+
+
+/**
+ * Implements hook_taxonomy_vocabulary_insert().
+ */
+function content_sync_src_taxonomy_vocabulary_insert($vocabulary) {
+  _content_sync_src_ping_remotes($vocabulary, 'taxonomy_vocabulary', 'insert');
+}
+
+
+
+/**
+ * TODO: support remote deletion of nodes??
+ */
+
+
+function _content_sync_src_prepare_ping_payload($entity, $type){
+  $payload = array();
+  $payload['source_url'] = url('', array('absolute'=>true));
+
+  $endpoint = services_endpoint_load(variable_get('content_sync_src_api_endpoint','-'));
+
+  // $payload['type'] = $entity->type; 
+
+  if($type == 'node'){
+    $types = variable_get('content_sync_src_node_types', array());
+    if(in_array($entity->type, $types)){
+      $payload['entitytype'] = $type; 
+      $payload['id'] = $entity->nid; 
+      if(isset($endpoint->resources['node']['alias'])){
+        $entitypath = $endpoint['resources']['node']['alias'];
+      } else {
+        $entitypath = 'node';
+      }
+      $payload['uri'] = url($endpoint->path.'/'.$entitypath.'/'.$entity->nid.'.json', array('absolute'=>true)); //TODO: allow XML?? 
+    } else {
+      return array();
+    }
+
+  }
+
+  if($type == 'taxonomy_term'){
+      $vocabs = variable_get('content_sync_src_vocabularies', array());
+      if(in_array($entity->vocabulary_machine_name, $vocabs)){
+        $payload['entitytype'] = $type; 
+        $payload['id'] = $entity->tid; 
+        if(isset($endpoint->resources['taxonomy_term']['alias'])){
+          $entitypath = $endpoint['resources']['taxonomy_term']['alias'];
+        } else {
+          $entitypath = 'taxonomy_term';
+        }
+        $payload['uri'] = url($endpoint->path.'/'.$entitypath.'/'.$entity->tid.'.json', array('absolute'=>true));
+      } else {
+        return array();
+      }
+  }
+
+  return $payload;
+}
+
+
+function _content_sync_src_ping_remotes($entity, $type, $action){
+    
+    $payload = _content_sync_src_prepare_ping_payload($entity, $type);
+
+    if(empty($payload)){
+      return false;
+    }
+
+    $data = drupal_json_encode($payload);
+
+    $endpoints = explode('\n',variable_get('content_sync_src_subscribed_urls',''));
+
+
+    if($action == 'insert'){
+      $method = 'POST';
+    }
+
+    if($action == 'update'){
+      $method = 'POST';
+    }
+
+    
+
+
+    if(is_array($endpoints)){
+
+
+      foreach($endpoints as $e){
+        dpm($e);
+        $response = drupal_http_request($e, array(
+          'headers' => array('Content-type'=>'application/json'),
+          'method' => $method,
+          'data' => $data,
+        ));
+
+
+        if($response->code == 200){
+          watchdog('content_sync_src', 'content sync initialisation success for '.$e);
+        } else {
+          watchdog('content_sync_src', 'error',  'content sync initialisation succesfull for '.$e.'. The destination server said: '.$response->code.' '. $response->status_message .' '.$response->error );
+        }
+
+      }
+
+
+    }
+
+    
+
+}
+
+
+
+
+
+
+
+
+/*
+headers: An array containing request headers to send as name/value pairs.
+method: A string containing the request method. Defaults to 'GET'.
+data: A string containing the request body, formatted as 'param=value&param=value&...'. Defaults to NULL.
+max_redirects: An integer representing how many times a redirect may be followed. Defaults to 3.
+timeout: A float representing the maximum number of seconds the function call may take. The default is 30 seconds. If a timeout occurs, the error code is set to the HTTP_REQUEST_TIMEOUT constant.
+context: A context resource created with stream_context_create().
+ */
+
+
+
+

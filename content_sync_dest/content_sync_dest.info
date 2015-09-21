@@ -1,0 +1,6 @@
+name = "Content sync destination site"
+description = "Custom module to set up a site as the destination to a content sync"
+package = "Content Sync"
+
+
+core = 7.x

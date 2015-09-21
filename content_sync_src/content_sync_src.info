@@ -1,0 +1,7 @@
+name = "Content sync source site"
+description = "Custom module to set up a site as the source to a content sync"
+package = "Content Sync"
+dependencies[] = services
+dependencies[] = rest_server
+
+core = 7.x

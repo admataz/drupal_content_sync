@@ -1,0 +1,10 @@
+<?php
+
+
+/**
+ * Implements hook_uninstall().
+ */
+function content_sync_dest_uninstall() {
+  // variable_del('content_sync_dest_trusetd_urls');
+}
+

@@ -1,0 +1,11 @@
+<?php
+
+
+/**
+ * Implements hook_uninstall().
+ */
+function content_sync_src_uninstall() {
+  variable_del('content_sync_src_subscribed_urls');
+}
+
+
